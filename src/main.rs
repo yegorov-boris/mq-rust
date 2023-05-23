@@ -1,3 +1,4 @@
+use std::cmp::Ordering::*;
 use std::collections::{HashMap, BTreeMap};
 
 fn main() {
@@ -15,9 +16,20 @@ fn main() {
     }
 }
 
+type R = BTreeMap<char, String>;
+
+type F = Box<dyn FnOnce(i64, i64) -> i64>;
+
+#[derive(Debug)]
 struct Line {
     name: String,
     args: Vec<String>,
+}
+
+impl Line {
+    fn get_char(&self, i: usize) -> char {
+        self.args[i].chars().next().unwrap()
+    }
 }
 
 pub struct AssemblerInterpreter {
@@ -32,24 +44,25 @@ impl AssemblerInterpreter {
                 .take_while(|c| *c != ';')
                 .collect::<String>()
                 .trim()
+                .to_string()
             )
             .filter(|s| !s.is_empty())
             .map(|line| {
-                let command: &str = line
+                let command: String = line
                     .chars()
                     .take_while(|&c| c >= 'a' && c <= 'z' || c == ':')
                     .collect();
                 if command.chars().last().unwrap() == ':' {
                     return Line {
                         name: "label".to_string(),
-                        args: vec![],
+                        args: vec![command.chars().take_while(|&c| c >= 'a' && c <= 'z').collect()],
                     }
                 }
-                if command == "msg" {
+                if command == String::from("msg") {
                     let mut a = String::new();
                     let mut a_s = String::new();
                     let mut l = Line {
-                        name: command.to_string(),
+                        name: command.clone(),
                         args: vec![],
                     };
                     for c in line.chars().skip(command.len()) {
@@ -76,11 +89,17 @@ impl AssemblerInterpreter {
                             },
                         };
                     }
+                    if !a_s.is_empty() {
+                        l.args.push(a_s);
+                    }
+                    if !a.is_empty() {
+                        l.args.push(a);
+                    }
                     return l;
                 }
                 let mut arg = String::new();
                 let mut l = Line {
-                    name: command.to_string(),
+                    name: command.clone(),
                     args: vec![],
                 };
                 for c in line.chars().skip(command.len()) {
@@ -96,6 +115,9 @@ impl AssemblerInterpreter {
                         },
                     };
                 }
+                if !arg.is_empty() {
+                    l.args.push(arg);
+                }
                 l
             })
             .collect();
@@ -103,14 +125,14 @@ impl AssemblerInterpreter {
             .iter()
             .enumerate()
             .filter(|p| p.1.name == "label")
-            .map(|(i, line)| (i, line.name.clone()))
+            .map(|(i, line)| (line.args[0].clone(), i))
         );
-        let mut registers: BTreeMap<char, String> = BTreeMap::new();
+        let mut registers: R = BTreeMap::new();
         let mut stack: Vec<usize> = vec![0];
         let mut output = String::new();
-        let mut cmp_x: i64 = 0;
-        let mut cmp_y: i64 = 0;
+        let mut cmp = Equal;
         while let Some(p) = stack.pop() {
+            let mut jmp = |line: &Line| stack.push(*labels.get(&line.args[0]).unwrap());
             let line = &lines[p];
             let name = &line.name[..];
             match name {
@@ -121,74 +143,82 @@ impl AssemblerInterpreter {
                     output = line.args
                         .iter()
                         .map(|a| {
-                            let r = a.chars()[0];
+                            let r = a.chars().next().unwrap();
                             if r == '\'' {
                                 return a.clone();
                             }
                             return registers
-                                .get(r)
+                                .get(&r)
                                 .unwrap()
                                 .clone();
                         })
                         .collect();
                 },
                 "mov" => {
-                    let x = &line.args[0];
-                    let x_first = x.chars().next().unwrap();
-                    let y = line.args[1].chars().next().unwrap();
-                    let v_x = registers.get(&x_first);
-                    let mut v = registers.get_mut(&y).unwrap();
-                    *v = if x_first >= '0' && x_first <= '9' {
-                        x.clone()
-                    } else {
-                        v_x.unwrap().clone()
-                    };
+                    let y = get_reg_or_num(&registers, line, 1);
+                    *registers.entry(line.get_char(0)).or_insert(y) = y.clone();
                 },
                 "inc" => {
-                    let x = line.args[0].chars().next().unwrap();
-                    let mut v = registers.get_mut(&x).unwrap();
+                    let v = registers.get_mut(&line.get_char(0)).unwrap();
                     *v = (v.parse::<i64>().unwrap() + 1).to_string();
                 },
                 "dec" => {
-                    let x = line.args[0].chars().next().unwrap();
-                    let mut v = registers.get_mut(&x).unwrap();
+                    let v = registers.get_mut(&line.get_char(0)).unwrap();
                     *v = (v.parse::<i64>().unwrap() - 1).to_string();
                 },
                 "add" => {
-
+                    let result = bin_op(Box::new(|a, b| a + b), &registers, line);
+                    *registers.entry(line.get_char(0)).or_insert(result) = result.clone();
                 },
                 "sub" => {
-
+                    let result = bin_op(Box::new(|a, b| a - b), &registers, line);
+                    *registers.entry(line.get_char(0)).or_insert(result) = result.clone();
                 },
                 "mul" => {
-
+                    let result = bin_op(Box::new(|a, b| a * b), &registers, line);
+                    *registers.entry(line.get_char(0)).or_insert(result) = result.clone();
                 },
                 "div" => {
-
+                    let result = bin_op(Box::new(|a, b| a / b), &registers, line);
+                    *registers.entry(line.get_char(0)).or_insert(result) = result.clone();
                 },
                 "cmp" => {
-
+                    let x = get_reg_or_num(&registers, &line, 0).parse::<i64>().unwrap();
+                    let y = get_reg_or_num(&registers, &line, 1).parse::<i64>().unwrap();
+                    cmp = x.cmp(&y);
                 },
                 "jne" => {
-
+                    if cmp != Equal {
+                        jmp(line);
+                    }
                 },
                 "je" => {
-
+                    if cmp == Equal {
+                        jmp(line);
+                    }
                 },
                 "jge" => {
-
+                    if cmp > Less {
+                        jmp(line);
+                    }
                 },
                 "jg" => {
-
+                    if cmp == Greater {
+                        jmp(line);
+                    }
                 },
                 "jle" => {
-
+                    if cmp < Greater {
+                        jmp(line);
+                    }
                 },
                 "jl" => {
-
+                    if cmp == Less {
+                        jmp(line);
+                    }
                 },
                 "call" | "jmp" => {
-                    stack.push(*labels.get(&line.args[0]).unwrap());
+                    jmp(line);
                 },
                 _ => {},
             };
@@ -198,4 +228,26 @@ impl AssemblerInterpreter {
         }
         None
     }
+}
+
+fn get_reg_or_num(r: &R, line: &Line, i: usize) -> String {
+    let x = &line.args[i];
+    let x_first = line.get_char(i);
+    if x_first >= '0' && x_first <= '9' {
+        x.clone()
+    } else {
+        r.get(&x_first).unwrap().clone()
+    }
+}
+
+fn lift(f: F, a: String, b: String) -> String {
+    f(a.parse::<i64>().unwrap(), b.parse::<i64>().unwrap()).to_string()
+}
+
+fn bin_op(f: F, r: &R, line: &Line) -> String {
+    lift(
+        f,
+        get_reg_or_num(r, line, 0),
+        get_reg_or_num(r, line, 1),
+    )
 }
